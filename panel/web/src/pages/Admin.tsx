@@ -1,10 +1,22 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { api, type PanelUser, type InstanceWithStatus } from '../api';
+import { api, type PanelUser, type InstanceWithStatus, type VolEntry } from '../api';
 import { useUI, PasswordInput } from '../ui';
 import { useAuth } from '../auth';
 
 const BUSY_PHASES = ['downloading', 'extracting', 'installing'];
+
+function fmtBytes(n: number): string {
+  if (!n) return '0 B';
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.min(u.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+  return `${(n / Math.pow(1024, i)).toFixed(i ? 1 : 0)} ${u[i]}`;
+}
+function fmtDate(ms: number): string {
+  const d = new Date(ms);
+  const p = (x: number) => String(x).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
 
 const MenuIcon = (
   <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -17,6 +29,41 @@ const CaretIcon = (
   <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <path d="M6 9l6 6 6-6" />
   </svg>
+);
+
+// 数据卷文件浏览器用的小图标（线性 SVG，统一描边风格，替代渲染不一致的 emoji）
+const svgIcon = (children: JSX.Element, size = 16) => (
+  <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    {children}
+  </svg>
+);
+const FolderIcon = svgIcon(<path d="M3 7a2 2 0 0 1 2-2h3.5l2 2H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />, 18);
+const FileIcon = svgIcon(
+  <>
+    <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+    <path d="M14 3v5h5" />
+  </>,
+  18,
+);
+const DownloadIcon = svgIcon(
+  <>
+    <path d="M12 3v12" />
+    <path d="M7 11l5 5 5-5" />
+    <path d="M5 21h14" />
+  </>,
+);
+const EditIcon = svgIcon(
+  <>
+    <path d="M12 20h9" />
+    <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z" />
+  </>,
+);
+const TrashIcon = svgIcon(
+  <>
+    <path d="M3 6h18" />
+    <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" />
+    <path d="M6 6l1 14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-14" />
+  </>,
 );
 
 // 友好空状态：圆形图标 + 标题 + 说明 + 可选引导按钮（沿用首页 .empty-state 样式）
@@ -47,6 +94,7 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
   const [deleteInst, setDeleteInst] = useState<InstanceWithStatus | null>(null); // 删除实例弹窗
   const [renameInst, setRenameInst] = useState<InstanceWithStatus | null>(null); // 重命名实例弹窗
   const [securityInst, setSecurityInst] = useState<InstanceWithStatus | null>(null); // 安全（内存阈值）弹窗
+  const [volumeInst, setVolumeInst] = useState<InstanceWithStatus | null>(null); // 数据卷管理弹窗
   const [acting, setActing] = useState<Record<string, string>>({}); // 实例 id → 进行中的动作文案（启动中/升级中…）
   // 未使用的旧数据卷（来自之前删实例时未勾选"彻底清除"）：允许复用以继承聊天记录，或显式删除。
   const [orphanVols, setOrphanVols] = useState<{ name: string; createdAt?: string; sizeBytes?: number }[]>([]);
@@ -257,6 +305,7 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
                     onAssign={() => setAssignInst(inst)}
                     onDelete={() => setDeleteInst(inst)}
                     onSecurity={() => setSecurityInst(inst)}
+                    onVolume={() => setVolumeInst(inst)}
                   />
                 ))}
               </div>
@@ -478,6 +527,9 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
             load();
           }}
         />
+      )}
+      {volumeInst && (
+        <VolumeManager inst={volumeInst} onClose={() => setVolumeInst(null)} onChanged={load} />
       )}
     </div>
   );
@@ -813,6 +865,7 @@ function InstanceAdminCard({
   onAssign,
   onDelete,
   onSecurity,
+  onVolume,
 }: {
   inst: InstanceWithStatus;
   userCount: number;
@@ -827,6 +880,7 @@ function InstanceAdminCard({
   onAssign: () => void;
   onDelete: () => void;
   onSecurity: () => void;
+  onVolume: () => void;
 }) {
   const wx = inst.wechat;
   const busy = BUSY_PHASES.includes(wx.phase);
@@ -930,6 +984,9 @@ function InstanceAdminCard({
                   <button className="btn-text" onClick={onSecurity} title="内存阈值自愈">
                     安全
                   </button>
+                  <button className="btn-text" onClick={onVolume} title="数据卷：备份/恢复、上传 PC 微信数据、文件管理">
+                    数据卷
+                  </button>
                 </div>
               </div>
               <div className="inst-menu-group inst-menu-danger">
@@ -943,6 +1000,273 @@ function InstanceAdminCard({
           )}
         </>
       )}
+    </div>
+  );
+}
+
+// 数据卷管理（仅管理员）：整卷备份/恢复 + 文件浏览器（浏览/上传/解压/下载/改名/移动/删除）。
+// 主要场景：把 PC 微信数据迁移上来、跨实例迁移、离线备份。全程在「运行中」的实例上操作
+// （浏览/改名/删除靠 docker exec，需容器运行）。整卷恢复会覆盖全部数据，强提示并建议恢复后重启实例。
+function VolumeManager({ inst, onClose, onChanged }: { inst: InstanceWithStatus; onClose: () => void; onChanged: () => void }) {
+  const { toast, confirm } = useUI();
+  const [path, setPath] = useState('');
+  const [entries, setEntries] = useState<VolEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(''); // 进行中操作文案；非空即禁用界面
+  const [mkdirOpen, setMkdirOpen] = useState(false);
+  const [mkdirName, setMkdirName] = useState('');
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [renameVal, setRenameVal] = useState('');
+  const uploadRef = useRef<HTMLInputElement>(null);
+  const extractRef = useRef<HTMLInputElement>(null);
+  const restoreRef = useRef<HTMLInputElement>(null);
+  const offline = inst.runtime !== 'running'; // 文件浏览需实例运行中
+
+  const join = (a: string, b: string) => (a ? a + '/' + b : b);
+
+  const load = async (p = path) => {
+    setLoading(true);
+    setErr('');
+    try {
+      const r = await api.volumeList(inst.id, p);
+      setEntries(r.entries);
+      setPath(r.path);
+    } catch (e: any) {
+      setErr(e?.message || '读取失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => {
+    if (offline) {
+      setLoading(false);
+      return;
+    }
+    load('');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inst.id]);
+
+  const sorted = [...entries].sort((a, b) => {
+    if ((a.type === 'dir') !== (b.type === 'dir')) return a.type === 'dir' ? -1 : 1;
+    return a.name.localeCompare(b.name, 'zh');
+  });
+  const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+  const segs = path ? path.split('/') : [];
+
+  const run = async (label: string, fn: () => Promise<any>, okMsg?: string, skipReload = false) => {
+    setBusy(label);
+    try {
+      await fn();
+      if (okMsg) toast(okMsg, 'ok');
+      if (!skipReload) await load();
+    } catch (e: any) {
+      toast(e?.message || '操作失败', 'error');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const doMkdir = async () => {
+    const name = mkdirName.trim();
+    if (!name) return;
+    await run('新建中…', () => api.volumeMkdir(inst.id, join(path, name)), '已新建文件夹');
+    setMkdirName('');
+    setMkdirOpen(false);
+  };
+
+  const doRename = async (oldName: string) => {
+    const nv = renameVal.trim();
+    setRenaming(null);
+    if (!nv || nv === oldName) return;
+    // 含 / → 视为相对 /config 的目标路径（移动到子目录）；否则同目录改名
+    const to = nv.includes('/') ? nv.replace(/^\/+/, '') : join(path, nv);
+    await run('处理中…', () => api.volumeMove(inst.id, join(path, oldName), to), '已重命名 / 移动');
+  };
+
+  const doDelete = async (en: VolEntry) => {
+    const ok = await confirm({
+      title: `删除「${en.name}」？`,
+      body: en.type === 'dir' ? '将递归删除该文件夹下所有内容，不可恢复。' : '删除后不可恢复。',
+      danger: true,
+      confirmText: '删除',
+    });
+    if (!ok) return;
+    await run('删除中…', () => api.volumeDelete(inst.id, join(path, en.name)), '已删除');
+  };
+
+  const onPick = (kind: 'upload' | 'extract' | 'restore') => async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    if (kind === 'restore') {
+      const ok = await confirm({
+        title: '恢复整卷备份？',
+        body: `将用「${file.name}」覆盖该实例 /config 的全部数据（含登录态、聊天库），不可撤销。建议仅用于本系统导出的备份；恢复后请在卡片上「重启」实例以加载数据。`,
+        danger: true,
+        confirmText: '覆盖恢复',
+      });
+      if (!ok) return;
+      await run(`恢复 ${file.name}…`, () => api.volumeRestore(inst.id, file), '恢复完成，请重启实例以加载数据', true);
+      onChanged();
+      return;
+    }
+    if (kind === 'upload') await run(`上传 ${file.name}…`, () => api.volumeUpload(inst.id, path, file), '上传完成');
+    else await run(`解压 ${file.name}…`, () => api.volumeExtract(inst.id, path, file), '解压完成');
+  };
+
+  const disabled = !!busy;
+  const icon = (en: VolEntry) => (en.type === 'dir' ? FolderIcon : FileIcon);
+
+  return (
+    <div className="modal-mask" onClick={onClose}>
+      <div className="card modal vol-modal" onClick={(e) => e.stopPropagation()}>
+        <h2>数据卷 · {inst.name}</h2>
+
+        {/* 整卷备份 / 恢复（运行/停止均可用） */}
+        <div className="vol-sec">
+          <div className="vol-section-label">整卷备份 / 恢复</div>
+          <div className="vol-topbar">
+            <a className="btn" href={api.volumeBackupUrl(inst.id)} target="_blank" rel="noreferrer">下载整卷备份</a>
+            <button className="btn" disabled={disabled} onClick={() => restoreRef.current?.click()}>恢复备份…</button>
+            <input ref={restoreRef} type="file" accept=".gz,.tgz,.tar" hidden onChange={onPick('restore')} />
+          </div>
+          <div className="vol-hint">整卷含聊天记录，用于跨实例迁移 / 离线备份。</div>
+        </div>
+
+        {offline ? (
+          <div className="vol-warn">
+            实例未运行，文件浏览不可用。可执行上方的整卷备份 / 恢复；要浏览或上传单个文件，请先在卡片上启动实例。
+          </div>
+        ) : (
+          <div className="vol-sec">
+            <div className="vol-section-label">文件浏览</div>
+            {/* 面包屑 */}
+            <div className="vol-crumbs">
+              <button className="vol-crumb" disabled={disabled} onClick={() => load('')}>/config</button>
+              {segs.map((s, i) => (
+                <span key={i}>
+                  <span className="vol-sep">/</span>
+                  <button className="vol-crumb" disabled={disabled} onClick={() => load(segs.slice(0, i + 1).join('/'))}>
+                    {s}
+                  </button>
+                </span>
+              ))}
+            </div>
+
+            {/* 工具条 */}
+            <div className="vol-tools">
+              <button className="btn-text" disabled={disabled} onClick={() => uploadRef.current?.click()}>上传文件</button>
+              <button className="btn-text" disabled={disabled} onClick={() => extractRef.current?.click()}>上传并解压</button>
+              <button className="btn-text" disabled={disabled} onClick={() => setMkdirOpen((v) => !v)}>新建文件夹</button>
+              <button className="btn-text" disabled={disabled} onClick={() => load()}>刷新</button>
+              <input ref={uploadRef} type="file" hidden onChange={onPick('upload')} />
+              <input ref={extractRef} type="file" accept=".gz,.tgz,.tar" hidden onChange={onPick('extract')} />
+            </div>
+            {mkdirOpen && (
+              <div className="vol-mkdir">
+                <input
+                  className="input"
+                  placeholder="文件夹名"
+                  value={mkdirName}
+                  autoFocus
+                  onChange={(e) => setMkdirName(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && doMkdir()}
+                />
+                <button className="btn btn-primary" disabled={disabled || !mkdirName.trim()} onClick={doMkdir}>创建</button>
+              </div>
+            )}
+
+            {busy && <div className="vol-busy">{busy}</div>}
+
+            {/* 文件列表 */}
+            <div className="vol-list">
+              {loading ? (
+                <div className="muted small" style={{ padding: 16 }}>读取中…</div>
+              ) : err ? (
+                <div className="error">{err}</div>
+              ) : sorted.length === 0 ? (
+                <div className="muted small" style={{ padding: 16 }}>{path ? '空目录' : '（无内容）'}</div>
+              ) : (
+                <>
+                  {path && (
+                    <button className="vol-row vol-main vol-up" disabled={disabled} onClick={() => load(parent)}>
+                      <span className="vol-ic">{FolderIcon}</span>
+                      <span className="vol-nm">返回上一级</span>
+                    </button>
+                  )}
+                  {sorted.map((en) => (
+                    <div className="vol-row" key={en.name}>
+                      {renaming === en.name ? (
+                        <input
+                          className="input vol-rename"
+                          autoFocus
+                          value={renameVal}
+                          onChange={(e) => setRenameVal(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') doRename(en.name);
+                            if (e.key === 'Escape') setRenaming(null);
+                          }}
+                          onBlur={() => doRename(en.name)}
+                        />
+                      ) : (
+                        <button
+                          className="vol-main"
+                          disabled={disabled}
+                          onClick={() => (en.type === 'dir' ? load(join(path, en.name)) : undefined)}
+                          style={{ cursor: en.type === 'dir' ? 'pointer' : 'default' }}
+                        >
+                          <span className={'vol-ic' + (en.type === 'dir' ? ' dir' : '')}>{icon(en)}</span>
+                          <span className="vol-nm">{en.name}</span>
+                          <span className="vol-meta">
+                            {en.type === 'dir' ? '' : fmtBytes(en.size)}
+                            {en.mtime ? ` · ${fmtDate(en.mtime)}` : ''}
+                          </span>
+                        </button>
+                      )}
+                      <div className="vol-acts">
+                        {en.type === 'file' && (
+                          <a
+                            className="vol-act"
+                            title="下载"
+                            href={api.volumeDownloadUrl(inst.id, join(path, en.name))}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            {DownloadIcon}
+                          </a>
+                        )}
+                        <button
+                          className="vol-act"
+                          title="重命名 / 移动"
+                          disabled={disabled}
+                          onClick={() => {
+                            setRenameVal(en.name);
+                            setRenaming(en.name);
+                          }}
+                        >
+                          {EditIcon}
+                        </button>
+                        <button className="vol-act danger" title="删除" disabled={disabled} onClick={() => doDelete(en)}>
+                          {TrashIcon}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
+        <div className="muted small" style={{ marginTop: 10, lineHeight: 1.6 }}>
+          PC 微信数据迁移：把数据文件夹打包成 <b>.tar.gz</b>，用「上传并解压」放到对应目录；改动微信正在使用的数据后，重启实例方可生效。能否解密取决于微信版本与设备绑定，请自行测试。
+        </div>
+
+        <div className="modal-actions">
+          <button className="btn btn-primary" onClick={onClose}>关闭</button>
+        </div>
+      </div>
     </div>
   );
 }

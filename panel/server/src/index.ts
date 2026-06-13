@@ -55,6 +55,15 @@ import {
   instanceMemoryMB,
   instanceHttpHealthy,
   regenInstanceMachineId,
+  listVolume,
+  volMkdir,
+  volMove,
+  volDelete,
+  volUploadFile,
+  volExtractArchive,
+  volDownloadFile,
+  volBackupStream,
+  volRestoreArchive,
 } from './docker.js';
 import { createSession, getSession, destroySession, destroyUserSessions } from './sessions.js';
 import { parseHost, parseAllowedHosts, isRequestHostAllowed } from './host-guard.js';
@@ -635,6 +644,144 @@ app.get('/api/admin/instances/:id/logs', async (req, reply) => {
   } catch (e: any) {
     reply.header('content-type', 'text/plain; charset=utf-8');
     return reply.send('获取日志失败：' + (e?.message || e));
+  }
+});
+
+// ---------- 数据卷管理（仅管理员）：浏览/上传/解压/下载/改名/移动/删除 + 整卷备份/恢复 ----------
+// 数据卷 = 容器 /config，含微信完整会话与加密聊天库 → 仅 admin 可见可用（admin 本就有 docker.sock=宿主 root，
+// 不新增风险；子账号永不可达）。
+// 全程在「运行中」的实例上操作：浏览/改名/移动/删除靠 docker exec（需容器运行），上传/解压/下载/备份靠
+// getArchive/putArchive。不强制停止实例（exec 在停止容器无法运行）。整卷恢复会覆盖全部数据，前端强提示
+// 并建议恢复后重启实例以加载数据。
+
+// 浏览目录（一层）
+app.get('/api/admin/instances/:id/volume', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const inst = findInstance((req.params as any).id);
+  if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  try {
+    return await listVolume(inst, String((req.query as any)?.path || ''));
+  } catch (e: any) {
+    return reply.code(400).send({ error: e?.message || '读取目录失败' });
+  }
+});
+
+// 新建文件夹
+app.post('/api/admin/instances/:id/volume/mkdir', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const inst = findInstance((req.params as any).id);
+  if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  try {
+    await volMkdir(inst, String((req.body as any)?.path || ''));
+    return { ok: true };
+  } catch (e: any) {
+    return reply.code(400).send({ error: e?.message || '新建失败' });
+  }
+});
+
+// 重命名 / 移动
+app.post('/api/admin/instances/:id/volume/move', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const inst = findInstance((req.params as any).id);
+  if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  const { from, to } = (req.body as any) ?? {};
+  try {
+    await volMove(inst, String(from || ''), String(to || ''));
+    return { ok: true };
+  } catch (e: any) {
+    return reply.code(400).send({ error: e?.message || '移动失败' });
+  }
+});
+
+// 删除文件 / 目录
+app.delete('/api/admin/instances/:id/volume', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const inst = findInstance((req.params as any).id);
+  if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  try {
+    await volDelete(inst, String((req.query as any)?.path || ''));
+    return { ok: true };
+  } catch (e: any) {
+    return reply.code(400).send({ error: e?.message || '删除失败' });
+  }
+});
+
+// 下载单个文件
+app.get('/api/admin/instances/:id/volume/download', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const inst = findInstance((req.params as any).id);
+  if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  const path = String((req.query as any)?.path || '');
+  const name = path.split('/').filter(Boolean).pop() || 'file';
+  try {
+    const buf = await volDownloadFile(inst, path);
+    reply.header('content-type', 'application/octet-stream');
+    reply.header('content-disposition', `attachment; filename*=UTF-8''${encodeURIComponent(name)}`);
+    return reply.send(buf);
+  } catch (e: any) {
+    return reply.code(400).send({ error: e?.message || '下载失败' });
+  }
+});
+
+// 上传单个文件到当前目录（原始二进制；落地为 abc 属主）
+app.post('/api/admin/instances/:id/volume/upload', { bodyLimit: 2 * 1024 * 1024 * 1024 }, async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const inst = findInstance((req.params as any).id);
+  if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  const path = String((req.query as any)?.path || '');
+  const name = String((req.query as any)?.name || '').trim();
+  const body = req.body as Buffer;
+  if (!Buffer.isBuffer(body) || body.length === 0) return reply.code(400).send({ error: '空文件或格式错误' });
+  try {
+    await volUploadFile(inst, path, name, body);
+    return { ok: true };
+  } catch (e: any) {
+    return reply.code(400).send({ error: e?.message || '上传失败' });
+  }
+});
+
+// 上传压缩包并解压到当前目录（.tar / .tar.gz；PC 微信数据迁移用）
+app.post('/api/admin/instances/:id/volume/extract', { bodyLimit: 3 * 1024 * 1024 * 1024 }, async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const inst = findInstance((req.params as any).id);
+  if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  const body = req.body as Buffer;
+  if (!Buffer.isBuffer(body) || body.length === 0) return reply.code(400).send({ error: '空文件或格式错误' });
+  try {
+    await volExtractArchive(inst, String((req.query as any)?.path || ''), body);
+    return { ok: true };
+  } catch (e: any) {
+    return reply.code(400).send({ error: e?.message || '解压失败（请确认是 .tar 或 .tar.gz）' });
+  }
+});
+
+// 整卷备份：流式下载 /config 为 .tar.gz
+app.get('/api/admin/instances/:id/volume/backup', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const inst = findInstance((req.params as any).id);
+  if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  try {
+    const stream = await volBackupStream(inst);
+    reply.header('content-type', 'application/gzip');
+    reply.header('content-disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`woc-${inst.name}-backup.tar.gz`)}`);
+    return reply.send(stream);
+  } catch (e: any) {
+    return reply.code(500).send({ error: e?.message || '备份失败' });
+  }
+});
+
+// 整卷恢复：上传本系统导出的 .tar.gz 备份（要求实例已停止）
+app.post('/api/admin/instances/:id/volume/restore', { bodyLimit: 3 * 1024 * 1024 * 1024 }, async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const inst = findInstance((req.params as any).id);
+  if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  const body = req.body as Buffer;
+  if (!Buffer.isBuffer(body) || body.length === 0) return reply.code(400).send({ error: '空文件或格式错误' });
+  try {
+    await volRestoreArchive(inst, body);
+    return { ok: true };
+  } catch (e: any) {
+    return reply.code(400).send({ error: e?.message || '恢复失败' });
   }
 });
 

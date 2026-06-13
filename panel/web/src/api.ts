@@ -41,6 +41,26 @@ export interface InstanceWithStatus extends PanelInstance {
   wechat: WechatStatus;
 }
 
+export interface VolEntry {
+  name: string;
+  type: 'dir' | 'file' | 'link' | 'other';
+  size: number;
+  mtime: number; // epoch ms
+}
+
+// 原始二进制上传（File 直传 application/octet-stream），用于数据卷上传/解压/恢复
+async function rawUpload(url: string, file: File): Promise<any> {
+  const res = await fetch(url, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'content-type': 'application/octet-stream' },
+    body: file,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error((data as any).error || `请求失败 (${res.status})`);
+  return data;
+}
+
 async function req<T = any>(path: string, opts: RequestInit = {}): Promise<T> {
   // 仅在有 body 时声明 JSON content-type：否则 Fastify 对「空 body + application/json」会报 400
   const headers = opts.body ? { 'content-type': 'application/json', ...opts.headers } : opts.headers;
@@ -137,6 +157,25 @@ export const api = {
   },
   downloadFileUrl: (id: string, name: string) => `/api/instances/${id}/download?name=${encodeURIComponent(name)}`,
   deleteFile: (id: string, name: string) => req(`/api/instances/${id}/files?name=${encodeURIComponent(name)}`, { method: 'DELETE' }),
+
+  // 数据卷管理（仅管理员）
+  volumeList: (id: string, path = '') =>
+    req<{ path: string; entries: VolEntry[] }>(`/api/admin/instances/${id}/volume?path=${encodeURIComponent(path)}`),
+  volumeMkdir: (id: string, path: string) =>
+    req(`/api/admin/instances/${id}/volume/mkdir`, { method: 'POST', body: JSON.stringify({ path }) }),
+  volumeMove: (id: string, from: string, to: string) =>
+    req(`/api/admin/instances/${id}/volume/move`, { method: 'POST', body: JSON.stringify({ from, to }) }),
+  volumeDelete: (id: string, path: string) =>
+    req(`/api/admin/instances/${id}/volume?path=${encodeURIComponent(path)}`, { method: 'DELETE' }),
+  volumeDownloadUrl: (id: string, path: string) =>
+    `/api/admin/instances/${id}/volume/download?path=${encodeURIComponent(path)}`,
+  volumeBackupUrl: (id: string) => `/api/admin/instances/${id}/volume/backup`,
+  volumeUpload: (id: string, path: string, file: File) =>
+    rawUpload(`/api/admin/instances/${id}/volume/upload?path=${encodeURIComponent(path)}&name=${encodeURIComponent(file.name)}`, file),
+  volumeExtract: (id: string, path: string, file: File) =>
+    rawUpload(`/api/admin/instances/${id}/volume/extract?path=${encodeURIComponent(path)}`, file),
+  volumeRestore: (id: string, file: File) =>
+    rawUpload(`/api/admin/instances/${id}/volume/restore`, file),
 
   // 多端协作：操作控制权
   controlStatus: (id: string) => req<{ free: boolean; mine: boolean; holder: string | null }>(`/api/instances/${id}/control`),

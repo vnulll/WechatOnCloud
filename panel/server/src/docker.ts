@@ -1,6 +1,7 @@
 import { hostname } from 'node:os';
 import { existsSync, readdirSync } from 'node:fs';
 import http from 'node:http';
+import zlib from 'node:zlib';
 import Docker from 'dockerode';
 import type { Instance } from './store.js';
 
@@ -522,10 +523,13 @@ export async function downloadFromInstance(inst: Instance, name: string): Promis
     stream.on('end', () => resolve());
     stream.on('error', reject);
   });
-  const tar = Buffer.concat(chunks);
-  // 解析 tar，定位真正的普通文件块。Docker(Go archive/tar) 在 mtime 含纳秒精度等情况下会先写一个
-  // PAX 扩展头块（typeflag 'x'），旧代码误把它当文件头、读到的是扩展记录长度 → 返回错误长度的数据
-  // （"大小不对"）。这里跳过 PAX/全局('x'/'g')与 GNU 长名('L'/'K')等扩展头，找到普通文件('0'/NUL)再取内容。
+  return extractSingleFileFromTar(Buffer.concat(chunks));
+}
+
+// 从 docker getArchive 返回的 tar 中取出第一个普通文件的内容。Docker(Go archive/tar) 在 mtime 含纳秒精度等
+// 情况下会先写一个 PAX 扩展头块（typeflag 'x'），把它误当文件头会读到扩展记录长度 → 返回错误长度的数据
+// （"大小不对"）。这里跳过 PAX/全局('x'/'g')与 GNU 长名('L'/'K')等扩展头，找到普通文件('0'/NUL)再取内容。
+function extractSingleFileFromTar(tar: Buffer): Buffer {
   let off = 0;
   while (off + 512 <= tar.length) {
     const header = tar.subarray(off, off + 512);
@@ -576,6 +580,124 @@ export async function typeInInstance(inst: Instance, text: string): Promise<void
     'xdotool key --clearmodifiers ctrl+v',
   ].join('; ');
   await execCapture(inst, ['bash', '-c', cmd]);
+}
+
+// ---------- 数据卷管理（仅管理员；路由层用 requireAdmin 限制） ----------
+// 数据卷 = 容器内 /config 持久卷，含微信全部数据（登录态、加密聊天库等）。提供浏览/上传/解压/下载/
+// 改名/移动/删除 + 整卷备份/恢复。主要场景：把 PC 微信数据迁移上来、跨实例迁移、离线备份。
+// 路径安全：所有相对路径经 safeVolPath 归一化并严格限制在 /config 内，禁止 .. 穿越。
+const VOL_ROOT = '/config';
+
+// 把用户给的相对路径安全解析为 /config 下的绝对路径；禁止 .. 与 NUL；剥离前导 /。
+function safeVolPath(rel: string): string {
+  const raw = (rel ?? '').replace(/\\/g, '/');
+  if (raw.includes('\0')) throw new Error('路径不合法');
+  const parts: string[] = [];
+  for (const seg of raw.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') throw new Error('路径不合法（禁止 ..）');
+    parts.push(seg);
+  }
+  return parts.length ? `${VOL_ROOT}/${parts.join('/')}` : VOL_ROOT;
+}
+const relOf = (abs: string): string => (abs === VOL_ROOT ? '' : abs.slice(VOL_ROOT.length + 1));
+// gzip 魔数自动识别（用户上传可能是 .tar 或 .tar.gz；本系统备份恒为 .gz）。
+const maybeGunzip = (buf: Buffer): Buffer =>
+  buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b ? zlib.gunzipSync(buf) : buf;
+
+export interface VolEntry {
+  name: string;
+  type: 'dir' | 'file' | 'link' | 'other';
+  size: number;
+  mtime: number; // epoch ms
+}
+
+// 列目录（仅一层）。dirs/files 混合返回，前端排序。
+export async function listVolume(inst: Instance, rel: string): Promise<{ path: string; entries: VolEntry[] }> {
+  const abs = safeVolPath(rel);
+  // GNU find -printf：%y 类型(d/f/l) \t %s 大小 \t %T@ mtime(秒.纳秒) \t %f 名字。argv 直传不经 shell，名字含空格/引号也安全。
+  const out = await execCapture(inst, [
+    'find', abs, '-maxdepth', '1', '-mindepth', '1', '-printf', '%y\\t%s\\t%T@\\t%f\\n',
+  ]);
+  const entries: VolEntry[] = [];
+  for (const line of out.split('\n')) {
+    if (!line) continue;
+    const i1 = line.indexOf('\t');
+    const i2 = line.indexOf('\t', i1 + 1);
+    const i3 = line.indexOf('\t', i2 + 1);
+    if (i1 < 0 || i2 < 0 || i3 < 0) continue;
+    const y = line.slice(0, i1);
+    entries.push({
+      type: y === 'd' ? 'dir' : y === 'f' ? 'file' : y === 'l' ? 'link' : 'other',
+      size: Number(line.slice(i1 + 1, i2)) || 0,
+      mtime: Math.round(parseFloat(line.slice(i2 + 1, i3)) * 1000) || 0,
+      name: line.slice(i3 + 1),
+    });
+  }
+  return { path: relOf(abs), entries };
+}
+
+export async function volMkdir(inst: Instance, rel: string): Promise<void> {
+  const abs = safeVolPath(rel);
+  if (abs === VOL_ROOT) throw new Error('路径不合法');
+  await execCapture(inst, ['mkdir', '-p', abs]);
+}
+
+export async function volMove(inst: Instance, fromRel: string, toRel: string): Promise<void> {
+  const from = safeVolPath(fromRel);
+  const to = safeVolPath(toRel);
+  if (from === VOL_ROOT || to === VOL_ROOT) throw new Error('不能移动数据卷根目录');
+  if (from === to) return;
+  await execCapture(inst, ['mv', '-f', from, to]);
+}
+
+export async function volDelete(inst: Instance, rel: string): Promise<void> {
+  const abs = safeVolPath(rel);
+  if (abs === VOL_ROOT) throw new Error('不能删除数据卷根目录');
+  await execCapture(inst, ['rm', '-rf', abs]);
+}
+
+// 上传单个文件到指定目录（tarSingleFile 写入 uid/gid 1000，落地即 abc 属主，微信可读）。
+export async function volUploadFile(inst: Instance, rel: string, name: string, content: Buffer): Promise<void> {
+  if (!safeName(name)) throw new Error('文件名不合法');
+  const dir = safeVolPath(rel);
+  await execCapture(inst, ['mkdir', '-p', dir]);
+  await docker.getContainer(inst.containerName).putArchive(tarSingleFile(name, content), { path: dir });
+}
+
+// 上传压缩包并解压到指定目录（PC 微信数据迁移：用户把文件夹打成 .tar/.tar.gz 上传）。
+// putArchive 把 tar 内容解到 dir 下，Docker 解包限制在 dir 内、防 .. 穿越。
+export async function volExtractArchive(inst: Instance, rel: string, archive: Buffer): Promise<void> {
+  const dir = safeVolPath(rel);
+  await execCapture(inst, ['mkdir', '-p', dir]);
+  await docker.getContainer(inst.containerName).putArchive(maybeGunzip(archive), { path: dir });
+}
+
+export async function volDownloadFile(inst: Instance, rel: string): Promise<Buffer> {
+  const abs = safeVolPath(rel);
+  if (abs === VOL_ROOT) throw new Error('不能下载整个根目录，请用整卷备份');
+  const stream = (await docker.getContainer(inst.containerName).getArchive({ path: abs })) as NodeJS.ReadableStream;
+  const chunks: Buffer[] = [];
+  await new Promise<void>((resolve, reject) => {
+    stream.on('data', (d: Buffer) => chunks.push(d));
+    stream.on('end', () => resolve());
+    stream.on('error', reject);
+  });
+  return extractSingleFileFromTar(Buffer.concat(chunks));
+}
+
+// 整卷备份：把 /config 打成 tar 流并经 gzip 输出（路由直接 pipe 给响应，避免大文件入内存）。
+// getArchive('/config') 的条目前缀为 config/，恢复时解到容器根即可落回 /config。
+export async function volBackupStream(inst: Instance): Promise<NodeJS.ReadableStream> {
+  const tar = (await docker.getContainer(inst.containerName).getArchive({ path: VOL_ROOT })) as NodeJS.ReadableStream;
+  const gzip = zlib.createGzip();
+  tar.on('error', (e) => gzip.destroy(e as Error));
+  return tar.pipe(gzip);
+}
+
+// 整卷恢复：仅适用于本系统导出的备份（条目前缀 config/），解到容器根 → 落回 /config。要求实例已停止。
+export async function volRestoreArchive(inst: Instance, archive: Buffer): Promise<void> {
+  await docker.getContainer(inst.containerName).putArchive(maybeGunzip(archive), { path: '/' });
 }
 
 // 实例容器名（供反代构造 target）。

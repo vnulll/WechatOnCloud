@@ -1812,3 +1812,215 @@ button {
     max-width: 940px;
   }
 }
+
+/* ── 数据卷管理（管理员）──────────────────────────────────── */
+.vol-modal {
+  width: 640px;
+  max-width: 92vw;
+  max-height: 86vh;
+}
+/* 运行中警示条：柔和琥珀，inset 凹槽质感（不是红色危险） */
+.vol-warn {
+  background: rgba(245, 166, 35, 0.14);
+  color: #9a6400;
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 9px 12px;
+  border-radius: var(--r-small);
+}
+/* 分区容器：内部元素紧凑成组（label 紧贴其内容），分区之间靠 .modal 的 12px gap 拉开 */
+.vol-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.vol-section-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.vol-hint {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.vol-topbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+/* 主操作：中号浮起胶囊（比默认 48px 更克制，和弹窗比例协调） */
+.vol-topbar .btn {
+  height: 40px;
+  padding: 0 18px;
+  font-size: 14px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+.vol-crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  font-size: 13px;
+}
+.vol-crumb {
+  border: none;
+  background: none;
+  color: var(--wx-green);
+  font-weight: 600;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 8px;
+}
+.vol-crumb:active {
+  background: rgba(var(--green-rgb) / 0.12);
+}
+.vol-crumb:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+.vol-sep {
+  color: var(--muted);
+}
+/* 工具栏：浮起小胶囊（绿字），和上面「扁平绿色面包屑」明显区分，读起来是"按钮"而非散落文字 */
+.vol-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.vol-tools .btn-text {
+  background: var(--surface);
+  box-shadow: var(--crease-press);
+  font-size: 14px;
+  padding: 8px 14px;
+}
+.vol-tools .btn-text:active {
+  transform: scale(0.96);
+}
+.vol-tools .btn-text:disabled {
+  opacity: 0.5;
+}
+.vol-mkdir {
+  display: flex;
+  gap: 8px;
+}
+.vol-mkdir .input {
+  flex: 1;
+}
+.vol-busy {
+  font-size: 13px;
+  color: var(--wx-green-dark);
+  font-weight: 600;
+}
+/* 列表容器：凹槽（inset），内部条目为浮起 bump（hover） */
+.vol-list {
+  background: var(--trough);
+  border-radius: var(--r-small);
+  padding: 6px;
+  max-height: 44vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  box-shadow: inset 0 1px 3px rgba(var(--shadow) / 0.22);
+}
+.vol-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 12px;
+  padding: 2px 4px 2px 6px;
+}
+.vol-row:hover {
+  background: var(--surface);
+  box-shadow: var(--crease-press);
+}
+.vol-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  border: none;
+  background: none;
+  text-align: left;
+  padding: 8px 4px;
+  color: var(--text);
+  font-size: 14px;
+}
+.vol-main:disabled {
+  opacity: 0.55;
+}
+.vol-up {
+  color: var(--muted);
+}
+.vol-ic {
+  flex: 0 0 auto;
+  width: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+}
+.vol-ic.dir {
+  color: var(--wx-green);
+}
+.vol-ic svg {
+  display: block;
+}
+.vol-nm {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vol-meta {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 12px;
+  padding-left: 8px;
+}
+.vol-rename {
+  flex: 1;
+  margin: 2px 0;
+}
+.vol-acts {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 3px;
+}
+.vol-act {
+  border: none;
+  background: var(--trough);
+  color: var(--muted);
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--crease-press);
+}
+.vol-row:hover .vol-act {
+  background: var(--base);
+  color: var(--text);
+}
+.vol-act:active {
+  transform: scale(0.92);
+}
+.vol-act.danger:hover {
+  color: var(--danger);
+  background: rgba(var(--danger-rgb) / 0.12);
+}
+.vol-act:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
