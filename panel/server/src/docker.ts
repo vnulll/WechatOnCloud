@@ -1,5 +1,6 @@
 import { hostname } from 'node:os';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, appendFileSync, mkdirSync, statSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { dirname } from 'node:path';
 import http from 'node:http';
 import zlib from 'node:zlib';
 import Docker from 'dockerode';
@@ -140,6 +141,8 @@ export async function runInstance(inst: Instance): Promise<void> {
   try {
     const existing = docker.getContainer(inst.containerName);
     await existing.inspect();
+    // 删除前先把旧容器最后日志快照进持久日志，否则随容器删除就看不到"上次为何停/崩"。
+    await snapshotContainerLog(inst, '容器重建（重启/升级/自愈），保留上一容器最后日志');
     await existing.remove({ force: true });
   } catch {
     /* 不存在，正常 */
@@ -183,6 +186,7 @@ export async function runInstance(inst: Instance): Promise<void> {
   const container = await docker.createContainer(createOpts);
   try {
     await container.start();
+    appendInstanceLog(inst.id, '容器已启动');
   } catch (e) {
     // 启动失败但容器已被创建出来（Created 状态），不清理的话会成为"幽灵容器"——
     // 它仍占着卷名 woc-data-<id>，让后续删卷报 409。修复 #23 时发现 4 个此类残留。
@@ -241,6 +245,7 @@ export async function regenInstanceMachineId(inst: Instance): Promise<void> {
 export async function stopInstance(inst: Instance): Promise<void> {
   try {
     await docker.getContainer(inst.containerName).stop({ t: 5 } as any);
+    appendInstanceLog(inst.id, '容器已停止');
   } catch {
     /* 已停止或不存在 */
   }
@@ -259,6 +264,7 @@ export async function removeInstance(inst: Instance, purgeVolume: boolean): Prom
     } catch {
       /* 卷可能不存在 */
     }
+    deleteInstanceLog(inst.id); // 彻底删除时一并清掉持久日志
   }
 }
 
@@ -578,6 +584,60 @@ export async function instanceLogs(inst: Instance, tail = 600): Promise<string> 
     i += 8 + size;
   }
   return out || buf.toString('utf8'); // 兜底：TTY 模式非多路复用
+}
+
+// ---------- 持久化日志（跨容器重建保留，存在面板数据卷里） ----------
+// docker logs 随容器重建（重启/升级/看门狗自愈）即丢失，看不到"上次为何重启/崩溃"。这里把
+// 重启原因 + 重建前的容器日志快照 + 生命周期事件，追加到面板数据卷的 /…/logs/<id>.log，跨重建保留。
+// 与 store.ts 的 accounts.json 同目录（面板数据卷，宿主 ./data-panel 持久化）。fallback 须与 store.ts 一致。
+const LOG_DIR = `${dirname(process.env.PANEL_DATA || '/data/panel/accounts.json')}/logs`;
+const LOG_CAP = 400 * 1024; // 每实例日志上限 ~400KB，超限截掉前半保留最近
+
+function logPath(id: string): string {
+  return `${LOG_DIR}/${id}.log`;
+}
+
+export function appendInstanceLog(id: string, line: string): void {
+  if (!/^[0-9a-f]{1,32}$/.test(id)) return; // 防路径注入；实例 id 为十六进制
+  try {
+    mkdirSync(LOG_DIR, { recursive: true });
+    const p = logPath(id);
+    appendFileSync(p, `[${new Date().toISOString()}] ${line}\n`);
+    const sz = statSync(p).size;
+    if (sz > LOG_CAP) writeFileSync(p, readFileSync(p).subarray(sz - Math.floor(LOG_CAP / 2)));
+  } catch {
+    /* 写持久日志失败不影响主流程 */
+  }
+}
+
+export function readInstanceLog(id: string): string {
+  if (!/^[0-9a-f]{1,32}$/.test(id)) return '';
+  try {
+    const p = logPath(id);
+    return existsSync(p) ? readFileSync(p, 'utf8') : '';
+  } catch {
+    return '';
+  }
+}
+
+// 实例彻底删除（连数据卷一并清除）时，顺手删掉它的持久日志文件，避免遗留孤儿。
+export function deleteInstanceLog(id: string): void {
+  if (!/^[0-9a-f]{1,32}$/.test(id)) return;
+  try {
+    rmSync(logPath(id), { force: true });
+  } catch {
+    /* 忽略 */
+  }
+}
+
+// 把"即将被删/重建"的容器最后日志快照进持久日志（否则随容器删除丢失）。
+export async function snapshotContainerLog(inst: Instance, reason: string): Promise<void> {
+  try {
+    const logs = (await instanceLogs(inst, 200)).trimEnd();
+    appendInstanceLog(inst.id, `──── ${reason} ────\n${logs}\n──── 上一容器日志快照结束 ────`);
+  } catch {
+    /* 容器可能已不可读，忽略 */
+  }
 }
 
 // 通过 xdotool 在实例容器内输入文字（绕过 VNC keysym 限制，解决中文 IME 吞字问题）。

@@ -50,6 +50,8 @@ import {
   downloadFromInstance,
   deleteInstanceFile,
   instanceLogs,
+  appendInstanceLog,
+  readInstanceLog,
   typeInInstance,
   keyInInstance,
   listOrphanVolumes,
@@ -669,14 +671,20 @@ app.get('/api/admin/instances/:id/logs', async (req, reply) => {
   if (!requireAdmin(req, reply)) return;
   const inst = findInstance((req.params as any).id);
   if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  reply.header('content-type', 'text/plain; charset=utf-8');
+  // 持久化历史（重启原因 + 上一容器日志快照，跨重建保留）+ 本次容器实时日志。
+  const history = readInstanceLog(inst.id).trimEnd();
+  let live = '';
   try {
-    const text = await instanceLogs(inst);
-    reply.header('content-type', 'text/plain; charset=utf-8');
-    return reply.send(text || '（暂无日志）');
+    live = (await instanceLogs(inst)).trimEnd();
   } catch (e: any) {
-    reply.header('content-type', 'text/plain; charset=utf-8');
-    return reply.send('获取日志失败：' + (e?.message || e));
+    live = '获取本次容器日志失败：' + (e?.message || e);
   }
+  if (!history && !live) return reply.send('（暂无日志）');
+  if (!history) return reply.send(live);
+  return reply.send(
+    `═══ 历史日志（持久化 · 跨重启保留）═══\n${history}\n\n═══ 本次容器日志（实时）═══\n${live || '（本次容器暂无日志）'}`,
+  );
 });
 
 // ---------- 数据卷管理（仅管理员）：浏览/上传/解压/下载/改名/移动/删除 + 整卷备份/恢复 ----------
@@ -1011,6 +1019,7 @@ if (WATCHDOG_ENABLED) {
   const recover = async (inst: Instance, reason: string, detail: string) => {
     recovering.add(inst.id);
     app.log.warn(`[watchdog] ${inst.containerName} ${detail}`);
+    appendInstanceLog(inst.id, `[看门狗] 自愈重启（${reason}）：${detail}`);
     try {
       await stopInstance(inst);
       await runInstance(inst);

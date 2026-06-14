@@ -1007,7 +1007,7 @@ function InstanceAdminCard({
                   <button className="btn-text" onClick={onAssign}>
                     分配账户
                   </button>
-                  <button className="btn-text" onClick={() => window.open(api.instanceLogsUrl(inst.id), '_blank')} title="查看实例容器日志">
+                  <button className="btn-text" onClick={() => window.open(api.instanceLogsUrl(inst.id), '_blank')} title="查看实例日志（含历史：重启原因 + 上一容器日志快照，跨重启保留）">
                     日志
                   </button>
                   <button className="btn-text" onClick={onSecurity} title="内存阈值自愈">
