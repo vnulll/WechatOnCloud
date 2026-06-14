@@ -92,13 +92,19 @@ function AboutSection({ isAdmin }: { isAdmin: boolean }) {
     api.getVersion().then(setInfo).catch(() => {});
   }, []);
 
+  // 当前版本是否为正式发布版（语义化 vX.Y.Z）。dev / dev-<sha> 等本地构建无法与发布版比较，
+  // 既不显示「已是最新」也不显示红点，只把最新发布版作为信息展示。
+  const isRelease = !!info && /^v?\d+\.\d+\.\d+$/.test(info.current);
+
   const check = async () => {
     setChecking(true);
     try {
       const r = await api.checkUpdate();
       setInfo(r);
-      if (r.hasUpdate) toast(`发现新版本 ${r.latest}`, 'ok');
-      else if (r.error) toast('检查失败：' + r.error, 'error');
+      const rel = /^v?\d+\.\d+\.\d+$/.test(r.current);
+      if (r.error) toast('检查失败：' + r.error, 'error');
+      else if (r.hasUpdate) toast(`发现新版本 ${r.latest}`, 'ok');
+      else if (!rel) toast(`最新发布 ${r.latest ?? '未知'}（当前为开发版）`, 'ok');
       else toast('已是最新版本', 'ok');
     } catch (e: any) {
       toast(e.message || '检查失败', 'error');
@@ -116,7 +122,7 @@ function AboutSection({ isAdmin }: { isAdmin: boolean }) {
         <div className="inst-card">
           <div className="inst-head">
             <span className="inst-name">云微 · WechatOnCloud</span>
-            {info?.hasUpdate && <span className="tag tag-warn">有新版</span>}
+            {info?.hasUpdate ? <span className="tag tag-warn">有新版</span> : info && !isRelease ? <span className="tag">开发版</span> : null}
           </div>
           <div className="inst-sub">
             当前版本 <b>{info?.current ?? '…'}</b>
@@ -125,7 +131,12 @@ function AboutSection({ isAdmin }: { isAdmin: boolean }) {
                 {' · '}最新 <b>{info.latest}</b>
               </>
             )}
-            {info && !info.hasUpdate && info.latest && !info.error && <>{' · '}已是最新</>}
+            {isRelease && info && !info.hasUpdate && info.latest && !info.error && <>{' · '}已是最新</>}
+            {!isRelease && info?.latest && !info.error && (
+              <>
+                {' · '}最新发布 <b>{info.latest}</b>
+              </>
+            )}
           </div>
           {info?.hasUpdate && (
             <div className="ver-hint">

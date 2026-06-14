@@ -10,9 +10,10 @@ set -euo pipefail
 
 OWNER="${WOC_IMAGE_OWNER:-gloridust}"
 TAG="${WOC_VERSION:-latest}"
-# 烤进面板镜像的版本号：设了 WOC_VERSION 就用它（如 v1.2.0），否则 dev（dev 不会触发「有新版」红点）。
-VER="${WOC_VERSION:-dev}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# 烤进面板镜像的版本号：设了 WOC_VERSION 就用它（如 v1.2.0），否则用 dev-<短SHA>（本地构建标识）。
+# 开发版不是正式发布版，面板「关于」会标「开发版」、不会触发「有新版」红点。
+VER="${WOC_VERSION:-dev-$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo local)}"
 
 PANEL_IMAGE="ghcr.io/${OWNER}/woc-panel:${TAG}"
 WECHAT_IMAGE="ghcr.io/${OWNER}/wechat-on-cloud:${TAG}"
