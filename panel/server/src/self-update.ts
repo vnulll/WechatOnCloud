@@ -78,7 +78,20 @@ async function buildCreateOpts(self: any, imageRef: string): Promise<Docker.Cont
 }
 
 // 面板侧：拉新镜像 + 派生 helper 容器重建自身。返回目标镜像。
+let updateInFlight = false;
+
 export async function triggerSelfUpdate(): Promise<{ target: string }> {
+  if (updateInFlight) throw new Error('面板更新已在进行中，请稍候');
+  updateInFlight = true;
+  try {
+    return await doSelfUpdate();
+  } catch (e) {
+    updateInFlight = false; // 失败可重试；成功后面板会被 helper 重建、本进程退出，无需复位
+    throw e;
+  }
+}
+
+async function doSelfUpdate(): Promise<{ target: string }> {
   const self: any = await docker.getContainer(PANEL_NAME).inspect();
   const ref: string = self.Config.Image; // 如 docker.io/gloridust/woc-panel:latest 或 :v1.2.1
   const repo = ref.split('@')[0].replace(/:[^/:]+$/, ''); // 去 tag
@@ -143,6 +156,7 @@ export async function runUpdaterRecreate(): Promise<void> {
     return;
   }
   console.log(`[updater] 重建面板 ${panelName} → ${newImage}`);
+  await new Promise((r) => setTimeout(r, 2500)); // 稍等：让面板把 HTTP 响应回给前端后再停它，避免前端误报"更新失败"
   const self: any = await docker.getContainer(panelName).inspect(); // 先抓旧配置（停之前）
   const otherNets = Object.keys(self.NetworkSettings?.Networks || {}).slice(1);
 
