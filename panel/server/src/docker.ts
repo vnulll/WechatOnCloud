@@ -771,6 +771,13 @@ function safeName(name: string): boolean {
   return !!name && name.length <= 200 && !name.includes('/') && !name.includes('\0') && name !== '.' && name !== '..';
 }
 
+// 壁纸/字体文件名：在 safeName 基础上，额外拒绝 shell 元字符。这些名字会被拼进 `sh -c '...${name}...'`
+// （xwallpaper/fc-scan 等），拒绝 ' " $ ` \ ; & | < > 及换行后，单引号内插值不可能被逃逸/注入，正常文件名
+//（含空格/括号/中文）仍放行。
+function safeMediaName(name: string): boolean {
+  return safeName(name) && !/['"$`\\;&|<>\r\n]/.test(name);
+}
+
 export async function uploadToInstance(inst: Instance, name: string, content: Buffer): Promise<void> {
   if (!safeName(name)) throw new Error('文件名不合法');
   await execCapture(inst, ['sh', '-c', `mkdir -p ${TRANSFER_DIR}`]); // abc 家目录可写
@@ -1033,18 +1040,11 @@ export async function listBackgrounds(inst: Instance): Promise<string[]> {
   } catch { return []; }
 }
 
-export async function getBackgroundImage(inst: Instance, name: string, thumb = false): Promise<Buffer> {
-  if (!safeName(name)) throw new Error('文件名不合法');
-  let path = `${BG_DIR}/${name}`;
-  if (thumb) {
-    const tmp = `/tmp/.woc-thumb-${name}`;
-    try {
-      await execCapture(inst, ['sh', '-c', `convert '${BG_DIR}/${name}' -resize 400x '${tmp}'`], 'root');
-      path = tmp;
-    } catch {
-      // convert 不可用或失败，回退原始图
-    }
-  }
+// 注：不再用 ImageMagick(convert) 生成缩略图（凭空胖 ~100MB + 引入注入点），直接回原图，前端按需缩放。
+// thumb 参数保留以兼容调用方，忽略之。
+export async function getBackgroundImage(inst: Instance, name: string, _thumb = false): Promise<Buffer> {
+  if (!safeMediaName(name)) throw new Error('文件名不合法');
+  const path = `${BG_DIR}/${name}`;
   const stream = (await docker.getContainer(inst.containerName).getArchive({ path })) as NodeJS.ReadableStream;
   const chunks: Buffer[] = [];
   await new Promise<void>((resolve, reject) => {
@@ -1052,28 +1052,23 @@ export async function getBackgroundImage(inst: Instance, name: string, thumb = f
     stream.on('end', () => resolve());
     stream.on('error', reject);
   });
-  const buf = extractSingleFileFromTar(Buffer.concat(chunks));
-  if (thumb) {
-    // 清理临时缩略图
-    execCapture(inst, ['rm', '-f', `/tmp/.woc-thumb-${name}`], 'root').catch(() => {});
-  }
-  return buf;
+  return extractSingleFileFromTar(Buffer.concat(chunks));
 }
 
 export async function uploadBackground(inst: Instance, name: string, content: Buffer): Promise<void> {
-  if (!safeName(name)) throw new Error('文件名不合法');
+  if (!safeMediaName(name)) throw new Error('文件名不合法');
   await execCapture(inst, ['mkdir', '-p', BG_DIR]);
   await docker.getContainer(inst.containerName).putArchive(tarSingleFile(name, content), { path: BG_DIR });
 }
 
 export async function applyBackground(inst: Instance, name: string): Promise<void> {
-  if (!safeName(name)) throw new Error('文件名不合法');
+  if (!safeMediaName(name)) throw new Error('文件名不合法');
   await execCapture(inst, ['sh', '-c', `DISPLAY=:1 xwallpaper --zoom '${BG_DIR}/${name}' 2>/dev/null`]);
   await execCapture(inst, ['sh', '-c', `echo '${name}' > '${WP_FILE}'`]);
 }
 
 export async function deleteBackground(inst: Instance, name: string): Promise<void> {
-  if (!safeName(name)) throw new Error('文件名不合法');
+  if (!safeMediaName(name)) throw new Error('文件名不合法');
   await execCapture(inst, ['rm', '-f', `${BG_DIR}/${name}`]);
   await execCapture(inst, ['sh', '-c', `if [ -f '${WP_FILE}' ] && [ "$(cat '${WP_FILE}')" = '${name}' ]; then rm -f '${WP_FILE}'; fi`]);
 }
@@ -1101,14 +1096,14 @@ export async function listFonts(inst: Instance): Promise<string[]> {
 }
 
 export async function uploadFont(inst: Instance, name: string, content: Buffer): Promise<void> {
-  if (!safeName(name)) throw new Error('文件名不合法');
+  if (!safeMediaName(name)) throw new Error('文件名不合法');
   await execCapture(inst, ['mkdir', '-p', FONT_DIR]);
   await docker.getContainer(inst.containerName).putArchive(tarSingleFile(name, content), { path: FONT_DIR });
   await execCapture(inst, ['fc-cache', '-f'], 'root');
 }
 
 export async function deleteFont(inst: Instance, name: string): Promise<void> {
-  if (!safeName(name)) throw new Error('文件名不合法');
+  if (!safeMediaName(name)) throw new Error('文件名不合法');
   await execCapture(inst, ['rm', '-f', `${FONT_DIR}/${name}`]);
   await execCapture(inst, ['fc-cache', '-f'], 'root');
 }
@@ -1118,7 +1113,7 @@ const FONT_SEL_FILE = '/config/.woc-font';
 // 将字体的 fontconfig family name 设为用户首选（fallback 仍用文泉驿等系统字体）。
 // 设空字符串或 "default" 则清除偏好，回退系统默认。
 export async function applyFont(inst: Instance, fontFile: string): Promise<void> {
-  if (fontFile && !safeName(fontFile)) throw new Error('文件名不合法');
+  if (fontFile && !safeMediaName(fontFile)) throw new Error('文件名不合法');
   if (fontFile && fontFile !== 'default') {
     // 用 fc-scan 读取字体实际 family name（取第一个）
     const out = await execCapture(inst, ['sh', '-c', `fc-scan --format='%{family[0]}' '${FONT_DIR}/${fontFile}' 2>/dev/null`]);
@@ -1204,6 +1199,7 @@ export async function getAppliedFont(inst: Instance): Promise<string> {
 }
 
 export async function getFontFamily(inst: Instance, fontFile: string): Promise<string> {
+  if (!safeMediaName(fontFile)) throw new Error('文件名不合法');
   try {
     const out = await execCapture(inst, ['sh', '-c', `fc-scan '${FONT_DIR}/${fontFile}' 2>/dev/null | grep 'family:' | head -1 | cut -d'"' -f2`]);
     return out.trim();

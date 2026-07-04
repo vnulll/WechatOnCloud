@@ -1025,9 +1025,12 @@ app.post('/api/admin/instances/:id/wechat/update', async (req, reply) => {
 });
 
 // ---------- 桌面壁纸管理 ----------
-const bgHandler = (id: string, reply: FastifyReply) => {
+const bgHandler = (id: string, reply: FastifyReply): Instance | null => {
   const inst = findInstance(id);
-  if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  if (!inst) {
+    reply.code(404).send({ error: '实例不存在' });
+    return null; // 关键：reply 是 truthy，不能 return 它，否则调用方 `if (!inst)` 拦不住
+  }
   return inst;
 };
 
